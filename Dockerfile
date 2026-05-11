@@ -49,6 +49,13 @@ RUN pip install --no-cache-dir \
 # Re-pin torchaudio in case any dep above pulled in 2.11
 RUN pip install --no-cache-dir --no-deps --force-reinstall torchaudio==2.7.0
 
+# Patch sam_audio for huggingface_hub >=1.0 compatibility:
+# proxies and resume_download are no longer passed by the hub mixin.
+RUN sed -i \
+    -e 's/proxies: Optional\[Dict\]/proxies: Optional[Dict] = None/' \
+    -e 's/resume_download: bool/resume_download: bool = False/' \
+    /usr/local/lib/python3.12/dist-packages/sam_audio/model/base.py
+
 # Verify the import chain works.
 RUN python -c "from sam_audio import SAMAudio, SAMAudioProcessor; print('sam_audio: OK')"
 
