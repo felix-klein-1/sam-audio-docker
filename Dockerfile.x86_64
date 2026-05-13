@@ -24,10 +24,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         git ffmpeg libsndfile1-dev build-essential curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# NGC 25.03 ships a custom torch (2.7.0a0+nv) tuned for NVIDIA hardware plus
-# torchvision and xformers, but NOT torchaudio. We install torchaudio
-# explicitly with --no-deps so pip does not try to replace NGC's custom torch.
-RUN pip install --no-deps torchaudio==2.7.0
+# NGC 25.03 ships a custom torch (2.7.0a0+nv, CUDA 12.8) tuned for NVIDIA
+# hardware plus torchvision, but NOT torchaudio. PyPI's torchaudio==2.7.0 is
+# built against CUDA 12.6 and fails torchaudio's CUDA-version check at import
+# time. Install from PyTorch's cu128 index instead. --no-deps prevents pip
+# from replacing NGC's custom torch.
+RUN pip install --no-deps --index-url https://download.pytorch.org/whl/cu128 torchaudio==2.7.0
 
 # torchcodec has real x86_64 wheels on PyPI (no stub needed, unlike ARM64).
 # --no-deps prevents pip from re-validating/replacing the NGC torch build.
@@ -61,7 +63,14 @@ RUN pip install \
         "rich>=13.9.4" tensorboard submitit
 
 # Defensive re-pin in case any dep above pulled torchaudio to 2.11 (CUDA 13).
-RUN pip install --no-cache-dir --no-deps --force-reinstall torchaudio==2.7.0
+# Same cu128 index — PyPI's torchaudio is CUDA 12.6 and won't import.
+RUN pip install --no-cache-dir --no-deps --force-reinstall --index-url https://download.pytorch.org/whl/cu128 torchaudio==2.7.0
+
+# xformers is not bundled in NGC 25.03-py3 (x86_64) — sam_audio's core
+# transformer imports it directly. --no-deps to keep NGC's torch in place.
+# Pin to 0.0.30 — built against torch 2.7. Newer xformers (0.0.31+) import
+# torch.distributed.distributed_c10d.GroupName, which was added in torch 2.8.
+RUN pip install --no-deps xformers==0.0.30
 
 # Build-time sanity check — fail fast if the import chain is broken.
 RUN python -c "from sam_audio import SAMAudio, SAMAudioProcessor; import torchcodec, xformers; print('imports OK')"
