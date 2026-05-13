@@ -1,0 +1,74 @@
+# SAM-Audio Docker image for Linux/x86_64 + CUDA (e.g. RunPod RTX 4090).
+#
+# Uses the same NGC base as the ARM64 Dockerfile (multi-arch image) so install
+# patterns, site-packages paths, and issues.md mitigations stay consistent
+# across architectures.
+#
+# Build:  docker build -f Dockerfile.x86_64.runpod -t sam-audio-x86-runpod .
+# Verify: docker run --rm --gpus all -v /workspace/hf-cache:/workspace/hf-cache sam-audio-x86-runpod
+#
+# The default CMD only verifies imports and prints torch/CUDA/GPU info — no
+# Hugging Face weights are downloaded and HF_TOKEN is not required.
+
+FROM nvcr.io/nvidia/pytorch:25.03-py3
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONUNBUFFERED=1 \
+    HF_HOME=/workspace/hf-cache
+
+# System packages: git (pip git+https deps), ffmpeg (pydub),
+# libsndfile (soundfile), build-essential/curl/ca-certificates as standard
+# build prerequisites in case any wheel falls back to a source build.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git ffmpeg libsndfile1-dev build-essential curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# NGC 25.03 ships a custom torch (2.7.0a0+nv) tuned for NVIDIA hardware plus
+# torchvision and xformers, but NOT torchaudio. We install torchaudio
+# explicitly with --no-deps so pip does not try to replace NGC's custom torch.
+RUN pip install --no-deps torchaudio==2.7.0
+
+# torchcodec has real x86_64 wheels on PyPI (no stub needed, unlike ARM64).
+# --no-deps prevents pip from re-validating/replacing the NGC torch build.
+RUN pip install --no-deps "torchcodec==0.7.0"
+
+# Packages that need --no-deps due to architecture-agnostic conflicts
+# (documented in issues.md):
+#   sam-audio + 4 git deps : depend on decord (problematic transitive resolution)
+#   descript-audiotools    : requires protobuf<3.20 (conflicts with NGC's 4.x)
+#   audiobox_aesthetics    : pulls torchaudio 2.11 (needs CUDA 13)
+RUN pip install --no-deps \
+        "sam_audio @ git+https://github.com/facebookresearch/sam-audio.git" \
+        "dacvae @ git+https://github.com/facebookresearch/dacvae.git" \
+        "imagebind @ git+https://github.com/facebookresearch/ImageBind.git" \
+        "laion-clap @ git+https://github.com/lematt1991/CLAP.git" \
+        "perception-models @ git+https://github.com/facebookresearch/perception_models@unpin-deps" \
+        "descript-audiotools>=0.7.2" \
+        audiobox_aesthetics
+
+# Remaining transitive deps. Pin huggingface-hub<1.0 to sidestep sam_audio's
+# incompatibility with the 1.0 mixin signature — avoids the sed patch used in
+# the ARM64 Dockerfile (cleaner and not path-dependent).
+RUN pip install \
+        einops "transformers>=4.54.0" timm "huggingface-hub<1.0" \
+        pydub torchdiffeq librosa soundfile \
+        "pytorchvideo @ git+https://github.com/facebookresearch/pytorchvideo.git@6cdc929315aab1b5674b6dcf73b16ec99147735f" \
+        ftfy regex iopath types-regex argbind \
+        "numba>=0.5.7" omegaconf scipy \
+        flatten-dict julius ffmpy markdown2 pyloudnorm randomname \
+        pystoi torch-stoi importlib-resources \
+        "rich>=13.9.4" tensorboard submitit
+
+# Defensive re-pin in case any dep above pulled torchaudio to 2.11 (CUDA 13).
+RUN pip install --no-cache-dir --no-deps --force-reinstall torchaudio==2.7.0
+
+# Build-time sanity check — fail fast if the import chain is broken.
+RUN python -c "from sam_audio import SAMAudio, SAMAudioProcessor; import torchcodec, xformers; print('imports OK')"
+
+WORKDIR /workspace
+COPY basic_text_prompting.py /workspace/basic_text_prompting.py
+
+# Default command: import everything and print versions / CUDA availability /
+# GPU name. No HF API calls, no from_pretrained, no HF_TOKEN required.
+CMD ["python", "-c", "import torch, torchaudio, torchcodec; from sam_audio import SAMAudio, SAMAudioProcessor; print(f'torch={torch.__version__}'); print(f'torchaudio={torchaudio.__version__}'); print(f'torchcodec={torchcodec.__version__}'); print(f'cuda_built={torch.version.cuda}'); print(f'cuda_available={torch.cuda.is_available()}'); print(f'gpu={torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"none\"}'); print('sam_audio:', SAMAudio.__name__, SAMAudioProcessor.__name__)"]
